@@ -17,7 +17,7 @@ def _build_insert_sql(table: str, columns: list[str], *, upsert: bool = False) -
     """Build a parameterized INSERT (or REPLACE) statement."""
     cols = ", ".join(f"`{c}`" for c in columns)
     placeholders = ", ".join(["%s"] * len(columns))
-    keyword = "REPLACE" if upsert else "INSERT"
+    keyword = "REPLACE" if upsert else "INSERT IGNORE"
     return f"{keyword} INTO `{table}` ({cols}) VALUES ({placeholders})"
 
 
@@ -64,9 +64,17 @@ def _do_transfer(
         # Get columns from source (need a non-streaming connection)
         tmp_conn = create_connection(source_cfg, streaming=False, tunnel=source_tunnel)
         try:
-            columns = get_columns(tmp_conn, table)
+            source_columns = get_columns(tmp_conn, table)
         finally:
             tmp_conn.close()
+
+        # Get columns from destination and use intersection to handle schema drift
+        dest_columns = get_columns(dest_conn, table)
+        if dest_columns:
+            dest_columns_set = set(dest_columns)
+            columns = [c for c in source_columns if c in dest_columns_set]
+        else:
+            columns = source_columns
 
         if not columns:
             stats["error"] = "No columns found"
@@ -115,6 +123,7 @@ def _do_transfer(
             dest_cur.execute("SET FOREIGN_KEY_CHECKS = 0")
             dest_cur.execute("SET UNIQUE_CHECKS = 0")
             dest_cur.execute("SET AUTOCOMMIT = 0")
+            dest_cur.execute("SET sql_mode = ''")
 
         # Stream from source
         if progress:
